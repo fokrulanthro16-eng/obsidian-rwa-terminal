@@ -4,12 +4,14 @@ Verifies:
 1. Peg deviation & Gold cross-spread mathematics
 2. Institutional 3-factor risk scoring bounds (0-100) & factor attribution
 3. Multi-regime stress test simulation determinism
-4. FastAPI REST endpoint contracts
+4. FastAPI REST endpoint contracts (with CMC client mocked — no live HTTP)
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -25,6 +27,55 @@ from agents.liquidity_risk import LiquidityRiskAgent
 from agents.stress_macro import StressMacroAgent
 from main import app
 from database import init_db
+
+
+# ---------------------------------------------------------------------------
+# Realistic stub quotes returned by the mocked CMC client in endpoint tests
+# ---------------------------------------------------------------------------
+_STUB_QUOTES = {
+    "PAXG": {
+        "symbol": "PAXG", "name": "PAX Gold", "asset_class": "GOLD",
+        "price_usd": 2700.0, "market_cap": 500_000_000.0,
+        "volume_24h": 25_000_000.0, "pct_1h": 0.1, "pct_24h": 0.3,
+        "pct_7d": 1.2, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "XAUT": {
+        "symbol": "XAUT", "name": "Tether Gold", "asset_class": "GOLD",
+        "price_usd": 2698.5, "market_cap": 480_000_000.0,
+        "volume_24h": 18_000_000.0, "pct_1h": 0.0, "pct_24h": 0.2,
+        "pct_7d": 1.1, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "ONDO": {
+        "symbol": "ONDO", "name": "Ondo", "asset_class": "TREASURY",
+        "price_usd": 1.05, "market_cap": 1_200_000_000.0,
+        "volume_24h": 60_000_000.0, "pct_1h": 0.2, "pct_24h": 1.5,
+        "pct_7d": 3.1, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "USDY": {
+        "symbol": "USDY", "name": "Ondo US Dollar Yield", "asset_class": "TREASURY",
+        "price_usd": 1.001, "market_cap": 300_000_000.0,
+        "volume_24h": 5_000_000.0, "pct_1h": 0.0, "pct_24h": 0.05,
+        "pct_7d": 0.1, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "CFG": {
+        "symbol": "CFG", "name": "Centrifuge", "asset_class": "CREDIT_INFRA",
+        "price_usd": 0.42, "market_cap": 180_000_000.0,
+        "volume_24h": 8_000_000.0, "pct_1h": -0.5, "pct_24h": -2.1,
+        "pct_7d": -4.3, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "POLYX": {
+        "symbol": "POLYX", "name": "Polymesh", "asset_class": "CREDIT_INFRA",
+        "price_usd": 0.21, "market_cap": 120_000_000.0,
+        "volume_24h": 4_500_000.0, "pct_1h": 0.1, "pct_24h": 0.8,
+        "pct_7d": 2.0, "last_updated": "2026-11-21T14:00:00Z",
+    },
+    "OM": {
+        "symbol": "OM", "name": "MANTRA", "asset_class": "CREDIT_INFRA",
+        "price_usd": 3.75, "market_cap": 3_500_000_000.0,
+        "volume_24h": 150_000_000.0, "pct_1h": 0.4, "pct_24h": 2.3,
+        "pct_7d": 5.8, "last_updated": "2026-11-21T14:00:00Z",
+    },
+}
 
 
 def test_gold_cross_spread_calculation():
@@ -126,7 +177,11 @@ def test_stress_test_determinism():
 
 @pytest.mark.asyncio
 async def test_fastapi_endpoint_contracts():
-    """Verify core FastAPI REST endpoints return expected contracts."""
+    """Verify core FastAPI REST endpoints return expected contracts.
+
+    The CoinMarketCap client is fully mocked — no live HTTP calls are made.
+    This keeps CI hermetic and fast regardless of API key validity.
+    """
     if TEST_DB_PATH.exists():
         try:
             TEST_DB_PATH.unlink()
@@ -134,55 +189,58 @@ async def test_fastapi_endpoint_contracts():
             pass
 
     await init_db()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Health
-        resp_health = await client.get("/api/health")
-        assert resp_health.status_code == 200
-        data_health = resp_health.json()
-        assert data_health["status"] == "HEALTHY"
-        assert "PAXG" in data_health["universe_symbols"]
 
-        # Alert Rules
-        resp_rules = await client.get("/api/alerts/rules")
-        assert resp_rules.status_code == 200
-        rules = resp_rules.json()
-        assert isinstance(rules, list)
-        assert len(rules) >= 2  # default seeded rules
+    # Patch get_rwa_quotes on the module-level cmc_client instance inside main
+    with patch("main.cmc_client.get_rwa_quotes", new=AsyncMock(return_value=_STUB_QUOTES)):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # Health (does not call CMC)
+            resp_health = await client.get("/api/health")
+            assert resp_health.status_code == 200
+            data_health = resp_health.json()
+            assert data_health["status"] == "HEALTHY"
+            assert "PAXG" in data_health["universe_symbols"]
 
-        # Create new rule
-        new_rule_payload = {
-            "symbol": "USDY",
-            "metric": "peg_bps",
-            "operator": ">",
-            "threshold": 15.0,
-            "webhook_url": "https://example.com/webhook",
-            "enabled": True,
-        }
-        resp_create = await client.post("/api/alerts/rules", json=new_rule_payload)
-        assert resp_create.status_code == 200
-        rule_id = resp_create.json()["id"]
+            # Alert Rules
+            resp_rules = await client.get("/api/alerts/rules")
+            assert resp_rules.status_code == 200
+            rules = resp_rules.json()
+            assert isinstance(rules, list)
+            assert len(rules) >= 2  # default seeded rules
 
-        # Delete rule
-        resp_del = await client.delete(f"/api/alerts/rules/{rule_id}")
-        assert resp_del.status_code == 200
+            # Create new rule
+            new_rule_payload = {
+                "symbol": "USDY",
+                "metric": "peg_bps",
+                "operator": ">",
+                "threshold": 15.0,
+                "webhook_url": "https://example.com/webhook",
+                "enabled": True,
+            }
+            resp_create = await client.post("/api/alerts/rules", json=new_rule_payload)
+            assert resp_create.status_code == 200
+            rule_id = resp_create.json()["id"]
 
-        # Portfolios
-        resp_ports = await client.get("/api/portfolios")
-        assert resp_ports.status_code == 200
-        ports = resp_ports.json()
-        assert len(ports) >= 2  # seeded presets
+            # Delete rule
+            resp_del = await client.delete(f"/api/alerts/rules/{rule_id}")
+            assert resp_del.status_code == 200
 
-        # Export CSV
-        resp_csv = await client.get("/api/rwa/export?format=csv")
-        assert resp_csv.status_code == 200
-        assert "text/csv" in resp_csv.headers["content-type"]
-        assert "PAXG" in resp_csv.text
+            # Portfolios
+            resp_ports = await client.get("/api/portfolios")
+            assert resp_ports.status_code == 200
+            ports = resp_ports.json()
+            assert len(ports) >= 2  # seeded presets
 
-        # Export JSON
-        resp_json = await client.get("/api/rwa/export?format=json")
-        assert resp_json.status_code == 200
-        assert "assets" in resp_json.json()
+            # Export CSV — uses mocked CMC quotes, no real HTTP
+            resp_csv = await client.get("/api/rwa/export?format=csv")
+            assert resp_csv.status_code == 200
+            assert "text/csv" in resp_csv.headers["content-type"]
+            assert "PAXG" in resp_csv.text
+
+            # Export JSON
+            resp_json = await client.get("/api/rwa/export?format=json")
+            assert resp_json.status_code == 200
+            assert "assets" in resp_json.json()
 
     # Clean up test DB file
     if TEST_DB_PATH.exists():

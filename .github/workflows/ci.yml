@@ -28,12 +28,18 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Syntax check
-        run: python -m py_compile main.py cmc_client.py database.py mcp_server.py ws_hub.py alert_engine.py agents/peg_quant.py agents/liquidity_risk.py agents/stress_macro.py
+        run: |
+          python -m py_compile main.py cmc_client.py database.py mcp_server.py \
+            ws_hub.py alert_engine.py agents/peg_quant.py \
+            agents/liquidity_risk.py agents/stress_macro.py
+        env:
+          PYTHONPATH: .
 
       - name: Run tests
         run: python -m pytest -v --tb=short
         env:
-          CMC_API_KEY: test_key_for_ci
+          PYTHONPATH: .
+          CMC_API_KEY: "ci-test-key"
 
   frontend:
     name: Frontend — Next.js
