@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: obsidian-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CMC_API_KEY=${CMC_API_KEY:-your_coinmarketcap_api_key_here}
+      - CMC_TIER=${CMC_TIER:-basic}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-YOUR_GEMINI_API_KEY_HERE}
+      - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-60}
+      - DEFAULT_WEBHOOK_URL=${DEFAULT_WEBHOOK_URL:-}
+      - DATABASE_PATH=/app/data/obsidian_rwa.db
+    volumes:
+      - obsidian_db_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: obsidian-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  obsidian_db_data:
+    driver: local

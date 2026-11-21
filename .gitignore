@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+.venv/
+node_modules/
+.next/
+demo_studio/
+*.mp4
+__pycache__/
+*.log
